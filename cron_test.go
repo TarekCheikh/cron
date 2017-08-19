@@ -336,24 +336,39 @@ func TestJobWithZeroTimeDoesNotRun(t *testing.T) {
 	}
 }
 
-// // Tests that duplicate names run with error
-// func TestRunningDuplicateNames(t *testing.T) {
-// wg := &sync.WaitGroup{}
-// wg.Add(1)
+// Add duplicate jobs, start cron, expect it to just run one
+func TestAddDuplicateJobsBeforeRunning(t *testing.T) {
+	cron := New()
 
-// cron := New()
-// cron.AddFunc("* * * * * ?", func() { wg.Done() }, "test31")
-// cron.AddFunc("* * * * * ?", func() { fmt.Println("duplicate name") }, "test31")
+	calls := 0
+	cron.AddFunc("* * * * * *", func() { calls += 1 }, "test31")
+	cron.AddFunc("* * * * * *", func() { calls += 1 }, "test31")
+	cron.AddFunc("* * * * * *", func() { calls += 1 }, "test31")
+	cron.Start()
+	defer cron.Stop()
 
-// cron.Start()
-// defer cron.Stop()
+	<-time.After(OneSecond)
+	if calls != 1 {
+		t.Errorf("called %d times, expected 1\n", calls)
+	}
+}
 
-// select {
-// case <-time.After(OneSecond):
-// t.FailNow()
-// case <-wait(wg):
-// }
-// }
+// Start cron, add duplicate jobs, expect it to just run one
+func TestAddDuplicateJobsWhileRunning(t *testing.T) {
+	cron := New()
+
+	calls := 0
+	cron.Start()
+	cron.AddFunc("* * * * * *", func() { calls += 1 }, "test32")
+	cron.AddFunc("* * * * * *", func() { calls += 1 }, "test32")
+	cron.AddFunc("* * * * * *", func() { calls += 1 }, "test32")
+	defer cron.Stop()
+
+	<-time.After(OneSecond)
+	if calls != 1 {
+		t.Errorf("called %d times, expected 1\n", calls)
+	}
+}
 
 // Add a job, start cron, remove the job, expect it to have not run
 func TestAddBeforeRunningThenRemoveWhileRunning(t *testing.T) {
@@ -361,12 +376,12 @@ func TestAddBeforeRunningThenRemoveWhileRunning(t *testing.T) {
 	wg.Add(1)
 
 	cron := New()
-	cron.AddFunc("* * * * * ?", func() { wg.Done() }, "test32")
+	cron.AddFunc("* * * * * ?", func() { wg.Done() }, "test33")
 
 	cron.Start()
 	defer cron.Stop()
 
-	cron.RemoveJob("test32")
+	cron.RemoveJob("test33")
 
 	select {
 	case <-time.After(OneSecond):
@@ -381,9 +396,9 @@ func TestAddBeforeRunningThenRemoveBeforeRunning(t *testing.T) {
 	wg.Add(1)
 
 	cron := New()
-	cron.AddFunc("* * * * * ?", func() { wg.Done() }, "test33")
+	cron.AddFunc("* * * * * ?", func() { wg.Done() }, "test34")
 
-	cron.RemoveJob("test33")
+	cron.RemoveJob("test34")
 	defer cron.Stop()
 
 	cron.Start()
@@ -395,6 +410,24 @@ func TestAddBeforeRunningThenRemoveBeforeRunning(t *testing.T) {
 	}
 }
 
+// Add a job, start cron, remove a no exist job, expect it to run
+func TestRemoveNoExistJob(t *testing.T) {
+	wg := &sync.WaitGroup{}
+	wg.Add(1)
+
+	cron := New()
+	cron.AddFunc("* * * * * ?", func() { wg.Done() }, "test35")
+
+	cron.Start()
+	defer cron.Stop()
+	cron.RemoveJob("test100")
+
+	select {
+	case <-time.After(OneSecond):
+		t.FailNow()
+	case <-wait(wg):
+	}
+}
 func wait(wg *sync.WaitGroup) chan bool {
 	ch := make(chan bool)
 	go func() {

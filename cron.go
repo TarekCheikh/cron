@@ -12,14 +12,16 @@ import (
 // specified by the schedule. It may be started, stopped, and the entries may
 // be inspected while running.
 type Cron struct {
-	entries  []*Entry
-	stop     chan struct{}
-	add      chan *Entry
-	remove   chan string
-	snapshot chan []*Entry
-	running  bool
-	ErrorLog *log.Logger
-	location *time.Location
+	entries   []*Entry
+	stop      chan struct{}
+	add       chan *Entry
+	remove    chan string
+	adderr    chan error
+	removeerr chan error
+	snapshot  chan []*Entry
+	running   bool
+	ErrorLog  *log.Logger
+	location  *time.Location
 }
 
 // Job is an interface for submitted cron jobs.
@@ -81,14 +83,16 @@ func New() *Cron {
 // NewWithLocation returns a new Cron job runner.
 func NewWithLocation(location *time.Location) *Cron {
 	return &Cron{
-		entries:  nil,
-		add:      make(chan *Entry),
-		stop:     make(chan struct{}),
-		remove:   make(chan string),
-		snapshot: make(chan []*Entry),
-		running:  false,
-		ErrorLog: nil,
-		location: location,
+		entries:   nil,
+		add:       make(chan *Entry),
+		stop:      make(chan struct{}),
+		remove:    make(chan string),
+		adderr:    make(chan error),
+		removeerr: make(chan error),
+		snapshot:  make(chan []*Entry),
+		running:   false,
+		ErrorLog:  nil,
+		location:  location,
 	}
 }
 
@@ -108,8 +112,8 @@ func (c *Cron) AddJob(spec string, cmd Job, name string) error {
 	if err != nil {
 		return err
 	}
-	c.Schedule(schedule, cmd, name)
-	return nil
+	err = c.Schedule(schedule, cmd, name)
+	return err
 }
 
 // RemoveJob removes a Job from the Cron based on name.
@@ -126,7 +130,8 @@ func (c *Cron) RemoveJob(name string) error {
 	}
 
 	c.remove <- name
-	return nil
+	removeerr := <-c.removeerr
+	return removeerr
 }
 
 // pos return index if name in the Cron entries else -1
@@ -141,7 +146,7 @@ func (c *Cron) pos(name string) int {
 }
 
 // Schedule adds a Job to the Cron to be run on the given schedule.
-func (c *Cron) Schedule(schedule Schedule, cmd Job, name string) {
+func (c *Cron) Schedule(schedule Schedule, cmd Job, name string) error {
 	entry := &Entry{
 		Schedule: schedule,
 		Job:      cmd,
@@ -151,14 +156,16 @@ func (c *Cron) Schedule(schedule Schedule, cmd Job, name string) {
 		p := c.pos(name)
 
 		if p != -1 {
-			fmt.Errorf("Duplicate names not allowed")
+			return fmt.Errorf("Duplicate names not allowed")
 		}
 
 		c.entries = append(c.entries, entry)
-		return
+		return nil
 	}
 
 	c.add <- entry
+	adderr := <-c.adderr
+	return adderr
 }
 
 // Entries returns a snapshot of the cron entries.
@@ -245,8 +252,10 @@ func (c *Cron) run() {
 			case newEntry := <-c.add:
 				p := c.pos(newEntry.Name)
 				if p != -1 {
+					c.adderr <- fmt.Errorf("Duplicate names not allowed")
 					break
 				}
+				c.adderr <- nil
 				timer.Stop()
 				now = c.now()
 				newEntry.Next = newEntry.Schedule.Next(now)
@@ -256,9 +265,11 @@ func (c *Cron) run() {
 				p := c.pos(name)
 
 				if p == -1 {
+					c.removeerr <- fmt.Errorf("no entry name: %s", name)
 					break
 				}
 
+				c.removeerr <- nil
 				c.entries = c.entries[:p+copy(c.entries[p:], c.entries[p+1:])]
 
 			case <-c.snapshot:
