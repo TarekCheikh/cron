@@ -1,6 +1,7 @@
 package cron
 
 import (
+	"fmt"
 	"log"
 	"runtime"
 	"sort"
@@ -14,6 +15,7 @@ type Cron struct {
 	entries  []*Entry
 	stop     chan struct{}
 	add      chan *Entry
+	remove   chan string
 	snapshot chan []*Entry
 	running  bool
 	ErrorLog *log.Logger
@@ -47,6 +49,9 @@ type Entry struct {
 
 	// The Job to run.
 	Job Job
+
+	// Unique name to identify the Entry so as to be able to remove it later.
+	Name string
 }
 
 // byTime is a wrapper for sorting the entry array by time
@@ -79,6 +84,7 @@ func NewWithLocation(location *time.Location) *Cron {
 		entries:  nil,
 		add:      make(chan *Entry),
 		stop:     make(chan struct{}),
+		remove:   make(chan string),
 		snapshot: make(chan []*Entry),
 		running:  false,
 		ErrorLog: nil,
@@ -92,27 +98,62 @@ type FuncJob func()
 func (f FuncJob) Run() { f() }
 
 // AddFunc adds a func to the Cron to be run on the given schedule.
-func (c *Cron) AddFunc(spec string, cmd func()) error {
-	return c.AddJob(spec, FuncJob(cmd))
+func (c *Cron) AddFunc(spec string, cmd func(), name string) error {
+	return c.AddJob(spec, FuncJob(cmd), name)
 }
 
 // AddJob adds a Job to the Cron to be run on the given schedule.
-func (c *Cron) AddJob(spec string, cmd Job) error {
+func (c *Cron) AddJob(spec string, cmd Job, name string) error {
 	schedule, err := Parse(spec)
 	if err != nil {
 		return err
 	}
-	c.Schedule(schedule, cmd)
+	c.Schedule(schedule, cmd, name)
 	return nil
 }
 
+// RemoveJob removes a Job from the Cron based on name.
+func (c *Cron) RemoveJob(name string) error {
+	if !c.running {
+		p := c.pos(name)
+
+		if p == -1 {
+			return fmt.Errorf("no entry name: %s", name)
+		}
+
+		c.entries = c.entries[:p+copy(c.entries[p:], c.entries[p+1:])]
+		return nil
+	}
+
+	c.remove <- name
+	return nil
+}
+
+// pos return index if name in the Cron entries else -1
+func (c *Cron) pos(name string) int {
+	for p, e := range c.entries {
+		if e.Name == name {
+			return p
+		}
+	}
+
+	return -1
+}
+
 // Schedule adds a Job to the Cron to be run on the given schedule.
-func (c *Cron) Schedule(schedule Schedule, cmd Job) {
+func (c *Cron) Schedule(schedule Schedule, cmd Job, name string) {
 	entry := &Entry{
 		Schedule: schedule,
 		Job:      cmd,
+		Name:     name,
 	}
 	if !c.running {
+		p := c.pos(name)
+
+		if p != -1 {
+			fmt.Errorf("Duplicate names not allowed")
+		}
+
 		c.entries = append(c.entries, entry)
 		return
 	}
@@ -202,10 +243,23 @@ func (c *Cron) run() {
 				}
 
 			case newEntry := <-c.add:
+				p := c.pos(newEntry.Name)
+				if p != -1 {
+					break
+				}
 				timer.Stop()
 				now = c.now()
 				newEntry.Next = newEntry.Schedule.Next(now)
 				c.entries = append(c.entries, newEntry)
+
+			case name := <-c.remove:
+				p := c.pos(name)
+
+				if p == -1 {
+					break
+				}
+
+				c.entries = c.entries[:p+copy(c.entries[p:], c.entries[p+1:])]
 
 			case <-c.snapshot:
 				c.snapshot <- c.entrySnapshot()
